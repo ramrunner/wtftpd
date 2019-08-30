@@ -1,0 +1,49 @@
+                   
+                --------          --------     --------
+	       |        |        |        |   |        |
+               |  disk  |        |  log   |   |  stat  |
+               |        |        |        |   |  TODO  |
+                --------          --------     --------
+                 ^   |
+               dreq dres                   
+                 |   v                          -------------
+                                               |             |
+             --------------                    |   daemon    |
+            |              |  <~~ spawns ~~    |             |
+            |    worker    |                    -------------
+            |              |
+             --------------                         ^
+                   ^                                |
+                   |                             WRQ/RRQ
+              DAT/ERR/ACK                           |
+                   |                           
+                   v
+
+
+-------------------------------------------------------------------
+[package disk]
+disk  : persistent goroutine, responds to read and write requests from
+channel dreq, to channel dres. Internally it stores a map fname to byte
+and synchronizes access to it.
+disk is a an io.Reader and io.Writer. this way when a buffer is copied
+to/from the disk to the worker, we can make sure the underlying storage
+will not be affected by further map operations.
+
+[package engine/packet]
+workers [package engine]  have a thread context and perform read/writes in lockstep.
+they are spawned by the daemon and are alive for the duration of the request.
+
+generally udp reads/writes have deadlines associated in order not to block forever.
+threads that have a context associated with them check it between blocks to figure
+out if they need to terminate.
+
+the daemon reads packets, logs them , and if they are wrq/rrq they spawn the relevant
+worker goroutine. 
+
+also included is a small client function for testing purposes in the engine.
+
+packet is responsible for marshalling/unmarshalling and string->netascii ops.
+
+[package log]
+instatiates two loggers, one in stdout and one in a file. 
+it provides structured logging per subsystem 
