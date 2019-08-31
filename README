@@ -1,10 +1,10 @@
-WTFtpd v0.1-pre
+WTFtpd v0.1
 
 by spiros thanasoulas <dsp@2f30.org>
 
 The Weekend TFTPd server is a small proof of concept implementation of the TFTP 
-protocol. It stores file only in memory so until the user puts files in, it's 
-quite empty. It can log requests on a file apart from the normal logging on
+protocol. It stores file only in memory but the user can initialize it by scanning
+a directory tree. It can log requests on a file apart from the normal logging on
 stdout. It also includes a small client implementation that is only used for
 black box testing.
 
@@ -12,6 +12,8 @@ Installation:
 make
 
 Usage of ./wtftpd:
+  -dir string
+        directory to scan for files to load (default ".")
   -ip string
         ip to listen on (default "localhost")
   -logfile string
@@ -23,9 +25,10 @@ Usage of ./wtftpd:
 
 TODO: 
 requests should also be io.Readers/io.Writers
-errors should have distinct types in an error package and be properly used to check test status
+errors should have distinct types in an error package and be properly used to check test status (DONE/0.1)
 more tests/fuzzing
 stat collection
-when a mode is not recognised we should let the client know.
-generally send more usefull errors to the client.
+when a mode is not recognised we should let the client know. (DONE/0.1)
+generally send more usefull errors to the client. (DONE/0.1)
 request flow in engine is spaggeti. refactor.
+scan a directory for initial files. (DONE/0.1)
