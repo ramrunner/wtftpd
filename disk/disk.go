@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"wtftpd/errors"
 	"wtftpd/log"
 )
 
@@ -41,6 +42,7 @@ func NewMapDisk(ctx context.Context, wg *sync.WaitGroup) *MapDisk {
 }
 
 func (m *MapDisk) serve(ctx context.Context, wg *sync.WaitGroup) {
+	const op errors.Op = "MapDisk.serve"
 	defer wg.Done()
 	for {
 		select {
@@ -54,7 +56,7 @@ func (m *MapDisk) serve(ctx context.Context, wg *sync.WaitGroup) {
 				if data, ok := m.store[req.fname]; ok {
 					sendReply(wg, req.resChan, true, data, nil)
 				} else {
-					sendReply(wg, req.resChan, true, nil, mkNXDiskError(req.fname))
+					sendReply(wg, req.resChan, true, nil, mkNXDiskError(op, req.fname))
 				}
 			case reqWrite:
 				if _, ok := m.store[req.fname]; ok {
@@ -97,8 +99,9 @@ type Request struct {
 // Request implements the io.Reader interface if it's a read request
 // it will error if the buffer is too small.
 func (r Request) Read(to []byte) (int, error) {
+	const op errors.Op = "Request.Read"
 	if r.reqType != reqRead {
-		return 0, mkReqDiskError("Read called on a write request")
+		return 0, mkReqDiskError(op, "Read called on a write request")
 	}
 	if len(to) == 0 {
 		return 0, nil // no buffer
@@ -109,22 +112,22 @@ func (r Request) Read(to []byte) (int, error) {
 		return 0, rep.err
 	}
 	if len(to) < len(rep.data) {
-		return 0, mkReqDiskError("destination buffer too small")
+		return 0, mkReqDiskError(op, "destination buffer too small")
 	}
 	hm := copy(to, rep.data)
 	return hm, nil
 }
 
 func (r Request) Write(from []byte) (int, error) {
+	const op errors.Op = "Request.Write"
 	if r.reqType != reqWrite {
-		return 0, mkReqDiskError("Write called on a read request")
+		return 0, mkReqDiskError(op, "Write called on a read request")
 	}
 	r.data = make([]byte, len(from))
 	copy(r.data, from)
 	r.inChan <- r
 	rep := <-r.resChan
 	return len(from), rep.err
-
 }
 
 // NewReadRequest creates a new request
@@ -171,10 +174,10 @@ func newWriteReply(err error) reply {
 	}
 }
 
-func mkNXDiskError(a string) error {
-	return fmt.Errorf("non existant filename:%s", a)
+func mkNXDiskError(op errors.Op, a string) error {
+	return errors.E(op, fmt.Sprintf("non existant filename:%s", a))
 }
 
-func mkReqDiskError(a string) error {
-	return fmt.Errorf("request failed:%s", a)
+func mkReqDiskError(op errors.Op, a string) error {
+	return errors.E(op, fmt.Sprintf("request failed:%s", a))
 }

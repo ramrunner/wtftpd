@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"wtftpd/errors"
 	"wtftpd/log"
 )
 
@@ -54,16 +55,17 @@ func NewNetASCII(a string) NetASCII {
 // returns a local variable from the mode, in order not to have to allocate a buffer
 // per packet to store it.
 func getMode(n []byte) (string, error) {
+	const op errors.Op = "getMode"
 	if len(n) == len(ModeNetASCII)+1 && bytes.Equal(n[:len(n)-1], []byte(ModeNetASCII)) {
-		return ModeNetASCII, mkPacketParseError("mode netascii not supported in wtftpd")
+		return ModeNetASCII, mkPacketParseError(op, "mode netascii not supported in wtftpd")
 	}
 	if len(n) == len(ModeOctet)+1 && bytes.Equal(n[:len(n)-1], []byte(ModeOctet)) {
 		return ModeOctet, nil
 	}
 	if len(n) == len(ModeMail)+1 && bytes.Equal(n[:len(n)-1], []byte(ModeMail)) {
-		return ModeMail, mkPacketParseError("mode mail not supported in wtftpd")
+		return ModeMail, mkPacketParseError(op, "mode mail not supported in wtftpd")
 	}
-	return "", mkPacketParseError(fmt.Sprintf("unknown mode string:%v", n))
+	return "", mkPacketParseError(op, fmt.Sprintf("unknown mode string:%v", n))
 }
 
 func (n NetASCII) String() string {
@@ -76,6 +78,7 @@ func (n NetASCII) String() string {
 //distinctions cause these would be silly filenames.
 //this will copy the null termination too
 func unmarshalNetASCII(b []byte) (NetASCII, int, error) {
+	const op errors.Op = "unmarshalNetASCII"
 	i := 0
 	for i = range b {
 		if b[i] < byte(128) && b[i] >= byte(0) {
@@ -83,7 +86,7 @@ func unmarshalNetASCII(b []byte) (NetASCII, int, error) {
 				break
 			}
 		} else {
-			return nil, i, mkPacketParseError("invalid netascii character")
+			return nil, i, mkPacketParseError(op, "invalid netascii character")
 		}
 	}
 	n := make([]byte, i)
@@ -107,8 +110,9 @@ func Marshal(pkt Packet) ([]byte, error) {
 // ParsePacket determines the correct type of message from the opcode and further marshals
 // that type.
 func ParsePacket(a []byte) (Packet, error) {
+	const op errors.Op = "ParsePacket"
 	if len(a) < minPktLen {
-		return nil, mkPacketParseError("length of packet less than minimum length")
+		return nil, mkPacketParseError(op, "length of packet less than minimum length")
 	}
 	opcode := binary.BigEndian.Uint16(a[0:2])
 	var p Packet
@@ -124,7 +128,7 @@ func ParsePacket(a []byte) (Packet, error) {
 	case 5:
 		p = new(ErrPacket)
 	default:
-		return nil, mkPacketParseError("unknown opcode")
+		return nil, mkPacketParseError(op, "unknown opcode")
 	}
 	if err := p.unmarshal(a[2:]); err != nil {
 		return nil, err
@@ -156,11 +160,12 @@ func (r *RRQPacket) marshal() ([]byte, error) {
 }
 
 func (r *RRQPacket) unmarshal(b []byte) error {
+	const op errors.Op = "RRQPacket.unmarshal"
 	if len(b) < minNoHdrInitPktLen {
-		return mkPacketParseError("Not enough bytes on read request")
+		return mkPacketParseError(op, "Not enough bytes on read request")
 	}
 	if len(b) > maxNoHdrInitPktLen {
-		return mkPacketParseError("Too many bytes on read request")
+		return mkPacketParseError(op, "Too many bytes on read request")
 	}
 	fname, fnlen, err := unmarshalNetASCII(b)
 	if err != nil {
@@ -200,11 +205,12 @@ func (w *WRQPacket) marshal() ([]byte, error) {
 }
 
 func (w *WRQPacket) unmarshal(b []byte) error {
+	const op errors.Op = "WRQPacket.unmarshal"
 	if len(b) < minNoHdrInitPktLen {
-		return mkPacketParseError("Not enough bytes on write request")
+		return mkPacketParseError(op, "Not enough bytes on write request")
 	}
 	if len(b) > maxNoHdrInitPktLen {
-		return mkPacketParseError("Too many bytes on write request")
+		return mkPacketParseError(op, "Too many bytes on write request")
 	}
 	fname, fnlen, err := unmarshalNetASCII(b)
 	if err != nil {
@@ -270,8 +276,9 @@ func (a *AckPacket) marshal() ([]byte, error) {
 }
 
 func (a *AckPacket) unmarshal(b []byte) error {
+	const op errors.Op = "AckPacket.unmarshal"
 	if len(b) != 2 {
-		return mkPacketParseError("ack packet with more bytes")
+		return mkPacketParseError(op, "ack packet with more bytes")
 	}
 	*a = AckPacket{
 		BlockNumber: binary.BigEndian.Uint16(b),
@@ -313,6 +320,6 @@ func (e *ErrPacket) unmarshal(b []byte) error {
 }
 
 // Type implements the Packet interface
-func mkPacketParseError(a string) error {
-	return fmt.Errorf("can't parse packet:%s", a)
+func mkPacketParseError(op errors.Op, a string) error {
+	return errors.E(op, fmt.Sprintf("can't parse packet:%s", a))
 }
