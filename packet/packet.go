@@ -57,15 +57,15 @@ func NewNetASCII(a string) NetASCII {
 func getMode(n []byte) (string, error) {
 	const op errors.Op = "getMode"
 	if len(n) == len(ModeNetASCII)+1 && bytes.Equal(n[:len(n)-1], []byte(ModeNetASCII)) {
-		return ModeNetASCII, mkPacketParseError(op, "mode netascii not supported in wtftpd")
+		return ModeNetASCII, errors.E(op, errors.ClientRelated, "mode netascii not supported in wtftpd")
 	}
 	if len(n) == len(ModeOctet)+1 && bytes.Equal(n[:len(n)-1], []byte(ModeOctet)) {
 		return ModeOctet, nil
 	}
 	if len(n) == len(ModeMail)+1 && bytes.Equal(n[:len(n)-1], []byte(ModeMail)) {
-		return ModeMail, mkPacketParseError(op, "mode mail not supported in wtftpd")
+		return ModeMail, errors.E(op, errors.ClientRelated, "mode mail not supported in wtftpd")
 	}
-	return "", mkPacketParseError(op, fmt.Sprintf("unknown mode string:%v", n))
+	return "", errors.E(op, errors.ClientRelated, fmt.Sprintf("unknown mode string:%v", n))
 }
 
 func (n NetASCII) String() string {
@@ -86,7 +86,7 @@ func unmarshalNetASCII(b []byte) (NetASCII, int, error) {
 				break
 			}
 		} else {
-			return nil, i, mkPacketParseError(op, "invalid netascii character")
+			return nil, i, errors.E(op, errors.ClientRelated, "invalid netascii character")
 		}
 	}
 	n := make([]byte, i)
@@ -112,7 +112,7 @@ func Marshal(pkt Packet) ([]byte, error) {
 func ParsePacket(a []byte) (Packet, error) {
 	const op errors.Op = "ParsePacket"
 	if len(a) < minPktLen {
-		return nil, mkPacketParseError(op, "length of packet less than minimum length")
+		return nil, errors.E(op, "length of packet less than minimum length")
 	}
 	opcode := binary.BigEndian.Uint16(a[0:2])
 	var p Packet
@@ -128,7 +128,7 @@ func ParsePacket(a []byte) (Packet, error) {
 	case 5:
 		p = new(ErrPacket)
 	default:
-		return nil, mkPacketParseError(op, "unknown opcode")
+		return nil, errors.E(op, errors.ClientRelated, "unknown opcode")
 	}
 	if err := p.unmarshal(a[2:]); err != nil {
 		return nil, err
@@ -162,10 +162,10 @@ func (r *RRQPacket) marshal() ([]byte, error) {
 func (r *RRQPacket) unmarshal(b []byte) error {
 	const op errors.Op = "RRQPacket.unmarshal"
 	if len(b) < minNoHdrInitPktLen {
-		return mkPacketParseError(op, "Not enough bytes on read request")
+		return errors.E(op, "Not enough bytes on read request")
 	}
 	if len(b) > maxNoHdrInitPktLen {
-		return mkPacketParseError(op, "Too many bytes on read request")
+		return errors.E(op, "Too many bytes on read request")
 	}
 	fname, fnlen, err := unmarshalNetASCII(b)
 	if err != nil {
@@ -207,10 +207,10 @@ func (w *WRQPacket) marshal() ([]byte, error) {
 func (w *WRQPacket) unmarshal(b []byte) error {
 	const op errors.Op = "WRQPacket.unmarshal"
 	if len(b) < minNoHdrInitPktLen {
-		return mkPacketParseError(op, "Not enough bytes on write request")
+		return errors.E(op, "Not enough bytes on write request")
 	}
 	if len(b) > maxNoHdrInitPktLen {
-		return mkPacketParseError(op, "Too many bytes on write request")
+		return errors.E(op, "Too many bytes on write request")
 	}
 	fname, fnlen, err := unmarshalNetASCII(b)
 	if err != nil {
@@ -278,7 +278,7 @@ func (a *AckPacket) marshal() ([]byte, error) {
 func (a *AckPacket) unmarshal(b []byte) error {
 	const op errors.Op = "AckPacket.unmarshal"
 	if len(b) != 2 {
-		return mkPacketParseError(op, "ack packet with more bytes")
+		return errors.E(op, "ack packet with more bytes")
 	}
 	*a = AckPacket{
 		BlockNumber: binary.BigEndian.Uint16(b),
@@ -317,9 +317,4 @@ func (e *ErrPacket) unmarshal(b []byte) error {
 		ErrCode: binary.BigEndian.Uint16(b[:2]),
 	}
 	return nil
-}
-
-// Type implements the Packet interface
-func mkPacketParseError(op errors.Op, a string) error {
-	return errors.E(op, fmt.Sprintf("can't parse packet:%s", a))
 }

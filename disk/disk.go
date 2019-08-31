@@ -5,6 +5,10 @@ package disk
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"wtftpd/errors"
 	"wtftpd/log"
@@ -18,8 +22,8 @@ const (
 	repWrite
 )
 
-// MapDisk is a map backed implementation of the Disk interface
-// it's request satisfy the io.Reader/io.Writer interfaces in order
+// MapDisk is a map backed implementation of a memory only datastore
+// for wtftpd.Its request satisfy the io.Reader/io.Writer interfaces in order
 // to get/put bytes on it. It requires a string filename in order to
 // associate them on them map. It is synchronized over channels.
 type MapDisk struct {
@@ -41,6 +45,49 @@ func NewMapDisk(ctx context.Context, wg *sync.WaitGroup) *MapDisk {
 	return md
 }
 
+func (m *MapDisk) list() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Disk Files:\n")
+	for k := range m.store {
+		fmt.Fprintf(&sb, " %s \n", k)
+	}
+	return sb.String()
+}
+
+// Initialize allows the MapDisk to read an initial set of files before
+// it starts serving them. It traverses a directory and reads all files under it.
+func (m *MapDisk) Initialize(dir string) {
+	err := filepath.Walk(dir, m.loadFile)
+	if err != nil {
+		log.DiskErrorf("error while initializing: %s", err)
+	}
+	log.DiskInfof(m.list())
+}
+
+// loadFile is performed on every file of the subdirs, trying to load it.
+// it doesn't return any errors, just logs them.
+func (m *MapDisk) loadFile(path string, f os.FileInfo, err error) error {
+	const op errors.Op = "loadFile"
+	if err != nil {
+		return err // propagate an error up.
+	}
+	if !f.IsDir() { // load it
+		fd, err := os.Open(path)
+		if err != nil { // can't open it. just log and ret
+			log.DiskErrorf("error while opening:%s. %s", f.Name(), err)
+			return nil
+		}
+		defer fd.Close()
+		fb, err := ioutil.ReadAll(fd)
+		if err != nil {
+			log.DiskErrorf("error while reading:%s. %s", f.Name(), err)
+			return nil
+		}
+		m.store[f.Name()] = fb
+	}
+	return nil
+}
+
 func (m *MapDisk) serve(ctx context.Context, wg *sync.WaitGroup) {
 	const op errors.Op = "MapDisk.serve"
 	defer wg.Done()
@@ -56,7 +103,7 @@ func (m *MapDisk) serve(ctx context.Context, wg *sync.WaitGroup) {
 				if data, ok := m.store[req.fname]; ok {
 					sendReply(wg, req.resChan, true, data, nil)
 				} else {
-					sendReply(wg, req.resChan, true, nil, mkNXDiskError(op, req.fname))
+					sendReply(wg, req.resChan, true, nil, errors.E(op, errors.DiskRelated, req.fname))
 				}
 			case reqWrite:
 				if _, ok := m.store[req.fname]; ok {
@@ -65,6 +112,7 @@ func (m *MapDisk) serve(ctx context.Context, wg *sync.WaitGroup) {
 					log.DiskTracef("creating new file:%s", req.fname)
 				}
 				m.store[req.fname] = req.data
+				log.DiskDebugf("new disk write. contents:%s", m.list())
 				sendReply(wg, req.resChan, false, nil, nil)
 			default:
 				log.DiskFatalf("unknown req type in the disk subsystem:%v+", req)
@@ -101,7 +149,7 @@ type Request struct {
 func (r Request) Read(to []byte) (int, error) {
 	const op errors.Op = "Request.Read"
 	if r.reqType != reqRead {
-		return 0, mkReqDiskError(op, "Read called on a write request")
+		return 0, errors.E(op, errors.DiskRelated, "Read called on a write request")
 	}
 	if len(to) == 0 {
 		return 0, nil // no buffer
@@ -112,7 +160,7 @@ func (r Request) Read(to []byte) (int, error) {
 		return 0, rep.err
 	}
 	if len(to) < len(rep.data) {
-		return 0, mkReqDiskError(op, "destination buffer too small")
+		return 0, errors.E(op, errors.DiskRelated, "destination buffer too small")
 	}
 	hm := copy(to, rep.data)
 	return hm, nil
@@ -121,7 +169,7 @@ func (r Request) Read(to []byte) (int, error) {
 func (r Request) Write(from []byte) (int, error) {
 	const op errors.Op = "Request.Write"
 	if r.reqType != reqWrite {
-		return 0, mkReqDiskError(op, "Write called on a read request")
+		return 0, errors.E(op, errors.DiskRelated, "Write called on a read request")
 	}
 	r.data = make([]byte, len(from))
 	copy(r.data, from)
@@ -172,12 +220,4 @@ func newWriteReply(err error) reply {
 		repType: repWrite,
 		err:     err,
 	}
-}
-
-func mkNXDiskError(op errors.Op, a string) error {
-	return errors.E(op, fmt.Sprintf("non existant filename:%s", a))
-}
-
-func mkReqDiskError(op errors.Op, a string) error {
-	return errors.E(op, fmt.Sprintf("request failed:%s", a))
 }

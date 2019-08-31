@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 	"wtftpd/disk"
+	"wtftpd/errors"
 	"wtftpd/log"
 	"wtftpd/packet"
 )
@@ -30,19 +31,21 @@ const (
 
 // Conf holds configuration vars
 type Conf struct {
-	ipstr string
-	port  uint16
+	ipstr string // ip of the interface to bind to
+	port  uint16 // port to start the daemon on
+	dir   string // dir to scan for initial files to load
 }
 
 // NewConf instantiates a new config
-func NewConf(ip string, port uint16) *Conf {
+func NewConf(ip string, port uint16, dir string) *Conf {
 	return &Conf{
 		ipstr: ip,
 		port:  port,
+		dir:   dir,
 	}
 }
 
-// Wtftpd is a hold the main thread contextand a config.
+// Wtftpd is a hold the main thread context and a config.
 type Wtftpd struct {
 	mainThread *threadCtx
 	conf       *Conf
@@ -52,6 +55,7 @@ type Wtftpd struct {
 // on a waitgroup and configure using a configuration struct
 func NewWtftpd(ctx context.Context, wg *sync.WaitGroup, cf *Conf) (*Wtftpd, error) {
 	disk := disk.NewMapDisk(ctx, wg)
+	disk.Initialize(cf.dir)
 	mthread, err := newThreadCtx(ctx, wg, disk, nil, cf.ipstr, cf.port)
 	if err != nil {
 		return nil, err
@@ -70,6 +74,8 @@ type clirequest struct {
 	out io.Writer
 }
 
+// a small client implementation mostly used for testing for now. It returns errors it encounters on an
+// error channel.
 func newWtftpdCli(ctx context.Context, wg *sync.WaitGroup, srv net.Addr, ec chan error, req clirequest) {
 	defer wg.Done()
 	defer close(ec) // that will notify our caller that we have exited
@@ -145,27 +151,26 @@ func newWtftpdCli(ctx context.Context, wg *sync.WaitGroup, srv net.Addr, ec chan
 
 //threadCtx keeps some context on running UDP goroutines
 type threadCtx struct {
-	pktCnt uint16          // tot number of packets processed
-	lpkt   packet.TFTPType // the type of the last packet transmitted
-	ctx    context.Context // context for cancellation
-	wg     *sync.WaitGroup // waitgroup for parent to wait on
-	conn   *net.UDPConn    // udp connection
-	addr   *net.UDPAddr    // a way to refer to our udp port
-	other  net.Addr        // the client that connected to us
-	disk   *disk.MapDisk   // the connection to issue disk requests
+	ctx   context.Context // context for cancellation
+	wg    *sync.WaitGroup // waitgroup for parent to wait on
+	conn  *net.UDPConn    // UDP connection
+	addr  *net.UDPAddr    // a way to refer to our UDP port
+	other net.Addr        // the client that connected to us
+	disk  *disk.MapDisk   // the connection to issue disk requests
 }
 
 // newThreadCtx creates a new thread context that is used when launching goroutines
-// it tries to get the udp port which should be provided from the conf for the main worker
+// it tries to get the UDP port which should be provided from the conf for the main worker
 // and be 0 to select an ephemeral port when launching children
 func newThreadCtx(ctx context.Context, wg *sync.WaitGroup, disk *disk.MapDisk, other net.Addr, ipstr string, port uint16) (*threadCtx, error) {
+	const op errors.Op = "newThreadCtx"
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", ipstr, port))
 	if err != nil {
-		return nil, err
+		return nil, errors.E(err, op, errors.NetRelated)
 	}
 	pc, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		return nil, err
+		return nil, errors.E(err, op, errors.NetRelated)
 	}
 	return &threadCtx{
 		ctx:   ctx,
@@ -189,6 +194,7 @@ type request struct {
 // packetToRequest determines the type of request to be created by the daemon depending
 // on the initial packet, and denies non WRQ or RRQ initial packets
 func packetToRequest(pkt packet.Packet) (rq *request, err error) {
+	const op errors.Op = "packetToRequest"
 	switch pkt.Type() {
 	case packet.RRQ:
 		rpkt := pkt.(*packet.RRQPacket)
@@ -205,14 +211,17 @@ func packetToRequest(pkt packet.Packet) (rq *request, err error) {
 			origPkt: pkt,
 		}
 	default:
-		err = mkEngineUnexpectedPacketError(fmt.Sprintf("not read or write initial packet %T", pkt))
+		err = errors.E(errors.SequenceRelated, op, fmt.Sprintf("not read or write initial packet %T", pkt))
 	}
 	return
 }
 
 // Serve is responsible for listening on the main tftp port and launching workers
-// it fires up a little goroutine to receive nonblockingly, in order to be aware
-// of possible context cancellations.
+// it selects nonblockingly for context cancellations, and on every iteration it
+// tries to receive and unmarshal a packet (blockingly) from the main tftpd port.
+// If there is an error at that stage that can be communicated back to the client it
+// does so. If the packet is the beginning of a request that it can satisfy it fires
+// up a new goroutine to satisfy that and goes back into listening for more requests.
 func (w Wtftpd) Serve() {
 	mt := w.mainThread
 	defer mt.wg.Done()
@@ -228,6 +237,15 @@ func (w Wtftpd) Serve() {
 			pkt, addr, err := w.mainThread.rcvUnmarshal()
 			if err != nil {
 				log.EngineFileLogf("could not unmarshal pkt: %s", err)
+				if ok, terr := errors.Is(err, errors.ClientRelated); ok {
+					// we need to set his addr to notify him
+					w.mainThread.other = addr
+					epkt := &packet.ErrPacket{
+						ErrCode: 1,
+						Msg:     packet.NewNetASCII(terr.Msg),
+					}
+					w.mainThread.marshalWrite(epkt)
+				}
 			}
 			if pkt == nil { // we're here due to timeout, go back
 				continue
@@ -254,12 +272,12 @@ func (w Wtftpd) Serve() {
 			go rq.serve()
 		}
 	}
-	log.EngineDebugf("engine stopping due to context cancellation")
 }
 
 // genNextPacket is the main state machine tracker. it creates a valid nextpacket
 // with the correct blocknumer, and also detects when the maximum blocknumber is reached.
 func genNextPacket(prev packet.Packet) (packet.Packet, error) {
+	const op errors.Op = "genNextPacket"
 	switch typedpkt := prev.(type) {
 	case *packet.RRQPacket: // the initial request packet. give him the first block
 		return &packet.DataPacket{BlockNumber: 1}, nil
@@ -267,25 +285,26 @@ func genNextPacket(prev packet.Packet) (packet.Packet, error) {
 		return &packet.AckPacket{BlockNumber: 0}, nil
 	case *packet.AckPacket:
 		if typedpkt.BlockNumber >= 65534 { // max file size reached.
-			return nil, mkEngineBlockNumberError("reached max blocknumber")
+			return nil, errors.E(errors.ClientRelated, op, "reached max blocknumber")
 		}
 		return &packet.DataPacket{BlockNumber: typedpkt.BlockNumber + 1}, nil
 	case *packet.DataPacket:
 		if typedpkt.BlockNumber > 65534 { // max file size reached. that should be the last we get
-			return nil, mkEngineBlockNumberError("reached max blocknumber")
+			return nil, errors.E(errors.ClientRelated, op, "reached max blocknumber")
 		}
 		return &packet.AckPacket{BlockNumber: typedpkt.BlockNumber}, nil
 	case *packet.ErrPacket:
-		return nil, mkEngineReceivedError(string(typedpkt.Msg))
+		return nil, errors.E(errors.ClientRelated, op, string(typedpkt.Msg))
 	}
 	return nil, nil // notreached
 }
 
 // setNextOpDeadline sets the deadline on the net.Conn
 func (t *threadCtx) setNextOpDeadline() {
+	const op errors.Op = "setNextOpDeadline"
 	dline := time.Now().Add(udpTimeoutSeconds * time.Second)
 	if err := t.conn.SetDeadline(dline); err != nil {
-		log.EngineFatal(err)
+		log.EngineFatal(errors.E(op, errors.NetRelated, err))
 	}
 	return
 }
@@ -293,6 +312,7 @@ func (t *threadCtx) setNextOpDeadline() {
 // marshalWrite marshals a packet, sets the deadline, and write it on
 // the connection
 func (t *threadCtx) marshalWrite(a packet.Packet) error {
+	const op errors.Op = "marshalWrite"
 	pbytes, err := packet.Marshal(a)
 	if err != nil {
 		log.EngineError(err)
@@ -300,7 +320,7 @@ func (t *threadCtx) marshalWrite(a packet.Packet) error {
 	}
 	t.setNextOpDeadline()
 	if n, err := t.conn.WriteTo(pbytes, t.other); err != nil {
-		log.EngineError(err)
+		log.EngineError(errors.E(op, errors.NetRelated, err))
 	} else {
 		log.EngineTracef("wrote %d bytes to %d", n, t.other)
 	}
@@ -311,6 +331,7 @@ func (t *threadCtx) marshalWrite(a packet.Packet) error {
 // rcvUnmarshal sets the deadline, creates a buffer and receives data
 // on it from the conn. in the end it parses the packet.
 func (t *threadCtx) rcvUnmarshal() (packet.Packet, net.Addr, error) {
+	const op errors.Op = "rcvUnmarshal"
 	buf := make([]byte, maxRcvBuf)
 	t.setNextOpDeadline()
 	n, addr, err := t.conn.ReadFrom(buf)
@@ -321,23 +342,24 @@ func (t *threadCtx) rcvUnmarshal() (packet.Packet, net.Addr, error) {
 		if e.Timeout() { // just return
 			return nil, nil, err
 		}
-		log.EngineError(err)
+		log.EngineError(errors.E(op, errors.NetRelated, err))
 		return nil, nil, err
 	}
 	pkt, err := packet.ParsePacket(buf[:n])
 	if err != nil {
 		log.EngineError(err)
-		return nil, nil, err
+		// here we return the addr because we might want to notify the cli
+		return nil, addr, err
 	}
 	return pkt, addr, nil
 }
 
 // serve satisfies the requests invoked by the main thread.
 // if it can straight way satisfy / or deny a read , it tries to read that
-// file from the disk in memory . if it doesn't exist it errors early.
+// file from the disk in memory . If it doesn't exist it errors early.
 // if the file exists, or if it a write request that needs to fill a buffer
 // before disk write is attempted, it goes in a loop where on every step
-// it does one send and then one receive. during this it updates the curpkt
+// it does one send and then one receive. During this it updates the curpkt
 // and uses it to get the next valid packet from  genNextPacket. While doing
 // that it also takes care for not accepting receives from other senders,
 // blocksizes maxing out, or retransmission if ACK's were not received form the
@@ -348,7 +370,7 @@ func (r *request) serve() {
 	defer r.thread.wg.Done()
 	defer r.thread.conn.Close()
 	// in this far from perfect design, the following vars
-	// are sadly global state to this func. make sure not to shadow
+	// are sadly global state to this func. Make sure not to shadow
 	// them using :=
 	var (
 		curpkt    packet.Packet // the current packet involved in the lockstep
@@ -384,6 +406,13 @@ func (r *request) serve() {
 			curpkt, nperr = genNextPacket(curpkt)
 			if nperr != nil {
 				log.EngineError(nperr)
+				if ok, te := errors.Is(nperr, errors.ClientRelated); ok { // if the client should know about max blocksize
+					epkt := &packet.ErrPacket{
+						ErrCode: 4,
+						Msg:     packet.NewNetASCII(te.Msg),
+					}
+					r.thread.marshalWrite(epkt)
+				}
 				return
 			}
 		} else {
@@ -434,7 +463,7 @@ func (r *request) serve() {
 			log.EngineTracef("received packet:%T %+v", rpkt, rpkt)
 			if addr.String() != r.thread.other.String() {
 				// we received something from another source than expected.
-				// rfc says error our previous peer and exit.
+				// RFC says error our previous peer and exit.
 				epkt := &packet.ErrPacket{
 					ErrCode: 5,
 					Msg:     packet.NewNetASCII("packet received from another source."),
@@ -447,7 +476,7 @@ func (r *request) serve() {
 			case *packet.AckPacket:
 				// check that the block matches.
 				if typedpkt.BlockNumber == curDatBlocknum {
-					// great. advance our buffer.
+					// great. Advance our buffer.
 					curBufInd += advance
 					// zero out our retransmits
 					retrans = 0
@@ -460,7 +489,7 @@ func (r *request) serve() {
 					log.EngineErrorf("zero data packet received")
 					return
 				}
-				// is it 512? are we getting more?
+				// is it 512? Are we getting more?
 				if len(typedpkt.Data) == maxDataPkt {
 					copy(buf[curBufInd:], typedpkt.Data)
 					curBufInd += maxDataPkt
@@ -498,18 +527,4 @@ func (r *request) serve() {
 		}
 	}
 
-}
-
-// in the future these functions should create proper
-// error types with useful attributes.
-func mkEngineUnexpectedPacketError(a string) error {
-	return fmt.Errorf("unexpected packet:%s", a)
-}
-
-func mkEngineBlockNumberError(a string) error {
-	return fmt.Errorf("block number:%s", a)
-}
-
-func mkEngineReceivedError(a string) error {
-	return fmt.Errorf("received error from peer:%s", a)
 }

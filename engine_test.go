@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"io/ioutil"
 	"net"
 	"sync"
 	"testing"
@@ -36,7 +37,7 @@ func TestEngine(t *testing.T) {
 	t.Run("simple cli and srv write", func(t *testing.T) {
 		ctx, cf := context.WithCancel(context.Background())
 		wg := &sync.WaitGroup{}
-		log.InitLogs("debug", "/dev/null")
+		log.InitLogs("debug", ioutil.Discard)
 		srv, err := NewWtftpd(ctx, wg, highSrvConf)
 		if err != nil {
 			t.Error(err)

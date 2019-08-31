@@ -1,6 +1,7 @@
 package log
 
 import (
+	"io"
 	"os"
 
 	l "github.com/sirupsen/logrus"
@@ -17,15 +18,11 @@ var (
 )
 
 // InitLogs starts the logging subsystem
-func InitLogs(a string, lf string) {
+func InitLogs(a string, lf io.Writer) {
 	l.SetFormatter(&l.JSONFormatter{})
 	l.SetOutput(os.Stdout)
-	f, err := os.OpenFile(lf, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
-	if err != nil {
-		l.Fatalf("can't open log file:%s %s", lf, err)
-	}
 	fileLogger = l.New()
-	fileLogger.SetOutput(f)
+	fileLogger.SetOutput(lf)
 	fileLogger.SetFormatter(&l.JSONFormatter{})
 	switch a {
 	case "debug":
@@ -49,6 +46,13 @@ func DiskInfof(format string, args ...interface{}) {
 	l.WithFields(l.Fields{
 		"system": logSubDisk,
 	}).Infof(format, args...)
+}
+
+// DiskErrorf logs in the error level, disk subsystem messages
+func DiskErrorf(format string, args ...interface{}) {
+	l.WithFields(l.Fields{
+		"system": logSubDisk,
+	}).Errorf(format, args...)
 }
 
 // DiskTracef logs in the trace level, disk subsystem messages
